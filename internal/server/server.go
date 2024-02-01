@@ -1,27 +1,33 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
-	"io"
-	"log"
+	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	sharepkg "github.com/s-min-sys/notifier-share/pkg"
 	"github.com/s-min-sys/notifier/internal/config"
-	"github.com/s-min-sys/notifier/internal/inters"
-	"github.com/s-min-sys/notifier/internal/telebot"
-	"github.com/s-min-sys/notifier/pkg"
-	"github.com/sgostarter/i/commerr"
 	"github.com/sgostarter/i/l"
+	"github.com/sgostarter/libeasygo/ptl"
 )
 
-func NewServer(logger l.Wrapper) *Server {
+func NewServer(cfg *config.Config, logger l.Wrapper) *Server {
 	if logger == nil {
 		logger = l.NewNopLoggerWrapper()
 	}
 
+	if cfg == nil {
+		logger.Fatal("no config")
+	}
+
 	s := &Server{
+		cfg:    cfg,
 		logger: logger.WithFields(l.StringField(l.ClsKey, "server")),
 	}
 
@@ -32,18 +38,13 @@ func NewServer(logger l.Wrapper) *Server {
 
 type Server struct {
 	wg     sync.WaitGroup
+	cfg    *config.Config
 	logger l.Wrapper
 
-	teleNotifier inters.Sender
+	senders sync.Map
 }
 
 func (s *Server) init() {
-	cfg := config.GetConfig()
-
-	if cfg.TeleConfig != nil {
-		s.teleNotifier = telebot.NewSender(cfg.TeleConfig.Token, cfg.TeleConfig.APIEndPoint, cfg.RedisCli, s.logger)
-	}
-
 	s.wg.Add(1)
 
 	go s.httpServerRoutine()
@@ -52,80 +53,122 @@ func (s *Server) init() {
 func (s *Server) httpServerRoutine() {
 	defer s.wg.Done()
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/send-text-message", func(writer http.ResponseWriter, request *http.Request) {
-		d, err := io.ReadAll(request.Body)
-		if err != nil {
-			writer.WriteHeader(http.StatusInternalServerError)
-
-			return
-		}
-
-		var req pkg.TextMessage
-
-		_ = json.Unmarshal(d, &req)
-		if req.Text == "" {
-			writer.WriteHeader(http.StatusInternalServerError)
-
-			return
-		}
-
-		err = s.SendTextMessage(req)
-
-		if err == nil {
-			writer.WriteHeader(http.StatusNoContent)
-		} else {
-			writer.WriteHeader(http.StatusInternalServerError)
-			_, _ = writer.Write([]byte(err.Error()))
-		}
-	})
-
-	// 创建服务器
-	server := &http.Server{
-		Addr:         config.GetConfig().Listen,
-		WriteTimeout: time.Second * 3,
-		Handler:      mux,
-	}
-
-	log.Fatal(server.ListenAndServe())
-}
-
-func (s *Server) SendTextMessage(message pkg.TextMessage) (err error) {
-	var senderIDs []pkg.SenderID
-
-	if message.SenderID == pkg.SenderIDAll {
-		senderIDs = append(senderIDs, pkg.SenderIDTelegram)
-		senderIDs = append(senderIDs, pkg.SenderIDWeChat)
-	} else {
-		senderIDs = append(senderIDs, message.SenderID)
-	}
-
-	for _, senderID := range senderIDs {
-		curMessage := message
-		curMessage.SenderID = senderID
-
-		switch senderID {
-		case pkg.SenderIDTelegram:
-			if s.teleNotifier == nil {
-				err = commerr.ErrUnavailable
-			} else {
-				err = s.teleNotifier.SendTextMessage(curMessage)
-			}
-		case pkg.SenderIDWeChat:
-			err = commerr.ErrUnimplemented
-		default:
-			err = commerr.ErrInvalidArgument
-		}
-
-		if err != nil {
-			s.logger.WithFields(l.ErrorField(err)).Error("send to %v failed", senderID)
-		}
-	}
-
-	return
+	sharepkg.RunCommandServer[sharepkg.TextMessage](s.cfg.Listens, "", s, s.logger)
 }
 
 func (s *Server) Wait() {
 	s.wg.Wait()
+}
+
+func (s *Server) SendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg string) {
+	httpClient, senderURL, msg := s.getOrCreateClientForSenderID(req.SenderID)
+	if httpClient == nil {
+		code = ptl.CodeErrInternal
+
+		return
+	}
+
+	senderReq := &sharepkg.SenderTextMessage{
+		ReceiverType: req.ReceiverType,
+		Receiver:     req.Receiver,
+		Text:         req.Text,
+	}
+
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, senderURL,
+		bytes.NewReader(senderReq.ToJSONBytes()))
+	if err != nil {
+		code = ptl.CodeErrInternal
+		msg = err.Error()
+
+		return
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		code = ptl.CodeErrInternal
+		msg = err.Error()
+
+		return
+	}
+
+	if httpResp == nil {
+		code = ptl.CodeErrInternal
+		msg = "no http resp"
+
+		return
+	}
+
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		code = ptl.CodeErrInternal
+		msg = fmt.Sprintf("http status code: %d", httpResp.StatusCode)
+
+		return
+	}
+
+	var resp ptl.ResponseWrapper
+
+	err = json.NewDecoder(httpResp.Body).Decode(&resp)
+	if err != nil {
+		code = ptl.CodeErrInternal
+		msg = err.Error()
+
+		return
+	}
+
+	code = resp.Code
+	msg = resp.RawMessage
+
+	return
+}
+
+func (s *Server) RegisterHandlers(_ *gin.RouterGroup) {
+
+}
+
+func (s *Server) getOrCreateClientForSenderID(senderID sharepkg.SenderID) (cli *http.Client, senderURL, errMsg string) {
+	senderURL, ok := s.cfg.Senders[string(senderID)]
+	if !ok {
+		errMsg = fmt.Sprintf("no url for the %s", senderID)
+
+		return
+	}
+
+	i, ok := s.senders.Load(senderID)
+	if !ok {
+		i, _ = s.senders.LoadOrStore(senderID, &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   2 * time.Second,
+					Deadline:  time.Now().Add(3 * time.Second),
+					KeepAlive: 2 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout: 2 * time.Second,
+			},
+			Timeout: 5 * time.Second,
+		})
+
+		ok = true
+	}
+
+	if !ok {
+		errMsg = fmt.Sprintf("logic error: cant cache http client for %s", senderID)
+
+		return
+	}
+
+	cli, ok = i.(*http.Client)
+	if !ok {
+		errMsg = "cached instance not http client"
+
+		s.senders.Delete(senderID)
+
+		return
+	}
+
+	return
 }
