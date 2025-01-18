@@ -61,6 +61,37 @@ func (s *Server) Wait() {
 }
 
 func (s *Server) SendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg string) {
+	if req.SenderID != sharepkg.SenderIDAll {
+		return s.sendTextMessage(req)
+	}
+
+	senderIDs := []sharepkg.SenderID{sharepkg.SenderIDTelegram, sharepkg.SenderIDWeChat, sharepkg.SenderIDFeiShu}
+
+	var errorCount int
+
+	m := make(map[string]string)
+
+	for _, senderID := range senderIDs {
+		req.SenderID = senderID
+
+		code, msg = s.sendTextMessage(req)
+		m[string(senderID)] = fmt.Sprintf("%d: %s", code, msg)
+
+		if code != ptl.CodeSuccess {
+			errorCount++
+		}
+	}
+
+	if errorCount == 0 {
+		return ptl.CodeSuccess, ""
+	}
+
+	d, _ := json.Marshal(m)
+
+	return ptl.CodeErrInternal, string(d)
+}
+
+func (s *Server) sendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg string) {
 	httpClient, senderURL, msg := s.getOrCreateClientForSenderID(req.SenderID)
 	if httpClient == nil {
 		code = ptl.CodeErrInternal
