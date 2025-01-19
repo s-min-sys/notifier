@@ -4,10 +4,10 @@ go 1.19
 
 require (
 	github.com/gin-gonic/gin v1.9.1
-	github.com/s-min-sys/notifier-share v0.0.4
+	github.com/s-min-sys/notifier-share v0.0.5
 	github.com/sgostarter/i v0.1.16
-	github.com/sgostarter/libconfig v0.0.1
-	github.com/sgostarter/libeasygo v0.1.68
+	github.com/sgostarter/libconfig v0.0.2
+	github.com/sgostarter/libeasygo v0.1.86
 	github.com/sgostarter/liblogrus v0.0.9
 	github.com/sirupsen/logrus v1.8.1
 )

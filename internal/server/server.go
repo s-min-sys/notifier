@@ -1,8 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,7 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	sharepkg "github.com/s-min-sys/notifier-share/pkg"
+	"github.com/s-min-sys/notifier-share/pkg/model"
 	"github.com/s-min-sys/notifier/internal/config"
+	"github.com/sgostarter/i/commerr"
 	"github.com/sgostarter/i/l"
 	"github.com/sgostarter/libeasygo/ptl"
 )
@@ -42,9 +42,15 @@ type Server struct {
 	logger l.Wrapper
 
 	senders sync.Map
+
+	allSenders []model.SenderBy
 }
 
 func (s *Server) init() {
+	for sender := range s.cfg.Senders {
+		s.allSenders = append(s.allSenders, model.SenderBy(sender))
+	}
+
 	s.wg.Add(1)
 
 	go s.httpServerRoutine()
@@ -53,29 +59,27 @@ func (s *Server) init() {
 func (s *Server) httpServerRoutine() {
 	defer s.wg.Done()
 
-	sharepkg.RunCommandServer[sharepkg.TextMessage](s.cfg.Listens, "", s, s.logger)
+	sharepkg.RunCommandServer[model.TextMessage](s.cfg.Listens, "", s, s, s.logger)
 }
 
 func (s *Server) Wait() {
 	s.wg.Wait()
 }
 
-func (s *Server) SendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg string) {
-	if req.SenderID != sharepkg.SenderIDAll {
+func (s *Server) SendTextMessage(req *model.TextMessage, _ sharepkg.Storage) (code ptl.Code, msg string) {
+	if req.SenderBy != model.SenderByAll {
 		return s.sendTextMessage(req)
 	}
-
-	senderIDs := []sharepkg.SenderID{sharepkg.SenderIDTelegram, sharepkg.SenderIDWeChat, sharepkg.SenderIDFeiShu}
 
 	var errorCount int
 
 	m := make(map[string]string)
 
-	for _, senderID := range senderIDs {
-		req.SenderID = senderID
+	for _, sender := range s.allSenders {
+		req.SenderBy = sender
 
 		code, msg = s.sendTextMessage(req)
-		m[string(senderID)] = fmt.Sprintf("%d: %s", code, msg)
+		m[string(sender)] = fmt.Sprintf("%d: %s", code, msg)
 
 		if code != ptl.CodeSuccess {
 			errorCount++
@@ -91,76 +95,26 @@ func (s *Server) SendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg 
 	return ptl.CodeErrInternal, string(d)
 }
 
-func (s *Server) sendTextMessage(req *sharepkg.TextMessage) (code ptl.Code, msg string) {
-	httpClient, senderURL, msg := s.getOrCreateClientForSenderID(req.SenderID)
-	if httpClient == nil {
-		code = ptl.CodeErrInternal
-
-		return
+func (s *Server) sendTextMessage(req *model.TextMessage) (ptl.Code, string) {
+	senderReq := &model.TextMessage{
+		SendMessageTarget: model.SendMessageTarget{
+			SenderBy: req.SenderBy,
+			BizCode:  req.BizCode,
+			ToType:   req.ToType,
+			To:       req.To,
+			FindOpts: req.FindOpts,
+		},
+		Text: req.Text,
 	}
 
-	senderReq := &sharepkg.SenderTextMessage{
-		ReceiverType: req.ReceiverType,
-		Receiver:     req.Receiver,
-		Text:         req.Text,
-	}
-
-	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, senderURL,
-		bytes.NewReader(senderReq.ToJSONBytes()))
-	if err != nil {
-		code = ptl.CodeErrInternal
-		msg = err.Error()
-
-		return
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		code = ptl.CodeErrInternal
-		msg = err.Error()
-
-		return
-	}
-
-	if httpResp == nil {
-		code = ptl.CodeErrInternal
-		msg = "no http resp"
-
-		return
-	}
-
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != http.StatusOK {
-		code = ptl.CodeErrInternal
-		msg = fmt.Sprintf("http status code: %d", httpResp.StatusCode)
-
-		return
-	}
-
-	var resp ptl.ResponseWrapper
-
-	err = json.NewDecoder(httpResp.Body).Decode(&resp)
-	if err != nil {
-		code = ptl.CodeErrInternal
-		msg = err.Error()
-
-		return
-	}
-
-	code = resp.Code
-	msg = resp.RawMessage
-
-	return
+	return s.trans(req.SenderBy, sharepkg.URLSendTextMessage, senderReq.ToJSONBytes(), nil)
 }
 
 func (s *Server) RegisterHandlers(_ *gin.RouterGroup) {
 
 }
 
-func (s *Server) getOrCreateClientForSenderID(senderID sharepkg.SenderID) (cli *http.Client, senderURL, errMsg string) {
+func (s *Server) getOrCreateClientForSenderID(senderID model.SenderBy) (cli *http.Client, senderURL, errMsg string) {
 	senderURL, ok := s.cfg.Senders[string(senderID)]
 	if !ok {
 		errMsg = fmt.Sprintf("no url for the %s", senderID)
@@ -174,11 +128,10 @@ func (s *Server) getOrCreateClientForSenderID(senderID sharepkg.SenderID) (cli *
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
 				DialContext: (&net.Dialer{
-					Timeout:   2 * time.Second,
-					Deadline:  time.Now().Add(3 * time.Second),
-					KeepAlive: 2 * time.Second,
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSHandshakeTimeout: 2 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
 			},
 			Timeout: 5 * time.Second,
 		})
@@ -200,6 +153,34 @@ func (s *Server) getOrCreateClientForSenderID(senderID sharepkg.SenderID) (cli *
 
 		return
 	}
+
+	return
+}
+
+//
+// Storage
+//
+
+func (s *Server) AddAdminUser(req *model.AdminUserAdd) (code ptl.Code, msg string) {
+	return s.trans(req.SenderBy, sharepkg.URLAddAdminUser, req.ToJSONBytes(), nil)
+}
+
+func (s *Server) GetAdminUsers(req *model.AdminUserGet) (users []model.UserG, code ptl.Code, msg string) {
+	code, msg = s.trans(req.SenderBy, sharepkg.URLGetAdminUsers, req.ToJSONBytes(), &users)
+
+	return
+}
+
+func (s *Server) FilterSenderTargets(_ model.SendMessageTarget) []model.SenderTarget {
+	return nil
+}
+
+func (s *Server) FindUser(_ string, _ int) (*model.User, error) {
+	return nil, commerr.ErrUnimplemented
+}
+
+func (s *Server) AddUser(_ model.User) (err error) {
+	err = commerr.ErrUnimplemented
 
 	return
 }
