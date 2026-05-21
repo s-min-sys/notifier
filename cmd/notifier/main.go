@@ -1,16 +1,14 @@
 package main
 
 import (
-	"github.com/s-min-sys/notifier/internal/config"
-	"github.com/s-min-sys/notifier/internal/server"
-	"github.com/sgostarter/i/l"
-	"github.com/sgostarter/liblogrus"
-	"github.com/sirupsen/logrus"
+	"github.com/GizmoVault/gotools/base/logx"
+	"github.com/s-min-sys/notifier/v2/internal/config"
+	"github.com/s-min-sys/notifier/v2/internal/server"
 )
 
 func main() {
-	logger := l.NewWrapper(liblogrus.NewLogrusEx(logrus.New()))
-	logger.GetLogger().SetLevel(l.LevelDebug)
+	logger := logx.NewConsoleLoggerWrapper()
+	logger.GetLogger().SetLevel(logx.LevelDebug)
 
 	logger.Info("process start")
 

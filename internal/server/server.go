@@ -8,19 +8,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GizmoVault/gotools/base/errorx"
+	"github.com/GizmoVault/gotools/base/logx"
 	"github.com/gin-gonic/gin"
-	sharepkg "github.com/s-min-sys/notifier-share/pkg"
-	"github.com/s-min-sys/notifier-share/pkg/model"
-	"github.com/s-min-sys/notifier/internal/config"
-	"github.com/sgostarter/i/commerr"
-	"github.com/sgostarter/i/l"
-	"github.com/sgostarter/libeasygo/ptl"
+	sharepkg "github.com/s-min-sys/notifier-share/v2/pkg"
+	"github.com/s-min-sys/notifier-share/v2/pkg/model"
+	"github.com/s-min-sys/notifier/v2/internal/config"
 )
 
-func NewServer(cfg *config.Config, logger l.Wrapper) *Server {
+func NewServer(cfg *config.Config, logger logx.Wrapper) *Server {
 	if logger == nil {
-		logger = l.NewNopLoggerWrapper()
+		logger = logx.NewNopLoggerWrapper()
 	}
+
+	logger = logger.WithFields(logx.StringField(logx.ClsKey, "server"))
 
 	if cfg == nil {
 		logger.Fatal("no config")
@@ -28,7 +29,7 @@ func NewServer(cfg *config.Config, logger l.Wrapper) *Server {
 
 	s := &Server{
 		cfg:    cfg,
-		logger: logger.WithFields(l.StringField(l.ClsKey, "server")),
+		logger: logger,
 	}
 
 	s.init()
@@ -39,7 +40,7 @@ func NewServer(cfg *config.Config, logger l.Wrapper) *Server {
 type Server struct {
 	wg     sync.WaitGroup
 	cfg    *config.Config
-	logger l.Wrapper
+	logger logx.Wrapper
 
 	senders sync.Map
 
@@ -66,7 +67,7 @@ func (s *Server) Wait() {
 	s.wg.Wait()
 }
 
-func (s *Server) SendTextMessage(req *model.TextMessage, _ sharepkg.Storage) (code ptl.Code, msg string) {
+func (s *Server) SendTextMessage(req *model.TextMessage, _ sharepkg.Storage) (code errorx.Code, msg string) {
 	if req.SenderBy != model.SenderByAll {
 		return s.sendTextMessage(req)
 	}
@@ -81,21 +82,21 @@ func (s *Server) SendTextMessage(req *model.TextMessage, _ sharepkg.Storage) (co
 		code, msg = s.sendTextMessage(req)
 		m[string(sender)] = fmt.Sprintf("%d: %s", code, msg)
 
-		if code != ptl.CodeSuccess {
+		if code != errorx.CodeSuccess {
 			errorCount++
 		}
 	}
 
 	if errorCount == 0 {
-		return ptl.CodeSuccess, ""
+		return errorx.CodeSuccess, ""
 	}
 
 	d, _ := json.Marshal(m)
 
-	return ptl.CodeErrInternal, string(d)
+	return errorx.CodeErrInternal, string(d)
 }
 
-func (s *Server) sendTextMessage(req *model.TextMessage) (ptl.Code, string) {
+func (s *Server) sendTextMessage(req *model.TextMessage) (errorx.Code, string) {
 	senderReq := &model.TextMessage{
 		SendMessageTarget: model.SendMessageTarget{
 			SenderBy: req.SenderBy,
@@ -135,14 +136,6 @@ func (s *Server) getOrCreateClientForSenderID(senderID model.SenderBy) (cli *htt
 			},
 			Timeout: 5 * time.Second,
 		})
-
-		ok = true
-	}
-
-	if !ok {
-		errMsg = fmt.Sprintf("logic error: cant cache http client for %s", senderID)
-
-		return
 	}
 
 	cli, ok = i.(*http.Client)
@@ -161,11 +154,11 @@ func (s *Server) getOrCreateClientForSenderID(senderID model.SenderBy) (cli *htt
 // Storage
 //
 
-func (s *Server) AddAdminUser(req *model.AdminUserAdd) (code ptl.Code, msg string) {
+func (s *Server) AddAdminUser(req *model.AdminUserAdd) (code errorx.Code, msg string) {
 	return s.trans(req.SenderBy, sharepkg.URLAddAdminUser, req.ToJSONBytes(), nil)
 }
 
-func (s *Server) GetAdminUsers(req *model.AdminUserGet) (users []model.UserG, code ptl.Code, msg string) {
+func (s *Server) GetAdminUsers(req *model.AdminUserGet) (users []model.UserG, code errorx.Code, msg string) {
 	code, msg = s.trans(req.SenderBy, sharepkg.URLGetAdminUsers, req.ToJSONBytes(), &users)
 
 	return
@@ -176,11 +169,11 @@ func (s *Server) FilterSenderTargets(_ model.SendMessageTarget) []model.SenderTa
 }
 
 func (s *Server) FindUser(_ string, _ int) (*model.User, error) {
-	return nil, commerr.ErrUnimplemented
+	return nil, errorx.ErrUnimplemented
 }
 
 func (s *Server) AddUser(_ model.User) (err error) {
-	err = commerr.ErrUnimplemented
+	err = errorx.ErrUnimplemented
 
 	return
 }

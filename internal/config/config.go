@@ -3,7 +3,7 @@ package config
 import (
 	"sync"
 
-	"github.com/sgostarter/libconfig"
+	"github.com/GizmoVault/gotools/configx"
 )
 
 type Config struct {
@@ -19,7 +19,7 @@ var (
 
 func GetConfig() *Config {
 	_once.Do(func() {
-		_, err := libconfig.Load("config.yaml", &_config)
+		_, err := configx.Load("config.yaml", &_config)
 		if err != nil {
 			panic(err)
 		}
