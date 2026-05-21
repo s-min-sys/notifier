@@ -22,4 +22,5 @@ go.work
 /.idea
 /notifier
 /tmp
-/dest
+/dist
+
