@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/GizmoVault/gotools v0.0.6
 	github.com/gin-gonic/gin v1.12.0
-	github.com/s-min-sys/notifier-share/v2 v2.0.5
+	github.com/s-min-sys/notifier-share/v2 v2.0.0
 )
 
 require (
@@ -44,6 +44,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/s-min-sys/notifier-share/v2 => ../notifier-share
+//replace github.com/s-min-sys/notifier-share/v2 => ../notifier-share
 
 //replace github.com/sgostarter/libeasygo => ../../work_sgostarter/libeasygo
